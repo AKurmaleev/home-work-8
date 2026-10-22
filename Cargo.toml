@@ -1,0 +1,11 @@
+[package]
+name = "rust_homework_8"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Homework 8: safe fixed-capacity MyVec and Hangman FSM"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
