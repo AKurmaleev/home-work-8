@@ -51,7 +51,7 @@ assert_eq!(words.pop().as_deref(), Some("hello"));
 ```sh
 cargo fmt --all --check
 cargo check --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --all-targets -- -D warnings -D unused_must_use -D clippy::let_underscore_must_use -D clippy::unused_result_ok
 cargo test --locked
 cargo test --locked --release
 ```
@@ -61,6 +61,8 @@ cargo test --locked --release
 - `MyVec<T>` owns `[Option<T>; 32]`; it never allocates a separate storage buffer.
   Element types such as `String` may allocate internally. No `Copy`, `Clone`,
   `Default`, or `Debug` bound is required for ordinary container operations.
+- Shared borrowing supports both `values.iter()` and `for value in &values` via
+  `IntoIterator for &MyVec<T>`; neither consumes nor clones elements.
 - Full-capacity `push` returns the original element without changing the container.
   `clear` removes elements before dropping them, preserving a valid remaining
   prefix if an element destructor unwinds. It does not promise rollback.

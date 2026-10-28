@@ -59,6 +59,10 @@ fn push_pop_basic() {
     assert_eq!(values.len(), 2);
     assert_eq!(values.get(0), Some(&10));
     assert_eq!(values.get(1), Some(&20));
+    assert_eq!(values.push(30), Ok(()));
+    assert_eq!(values.len(), 3);
+    assert_eq!(values.pop(), Some(30));
+    assert_eq!(values.len(), 2);
     assert_eq!(values.pop(), Some(20));
     assert_eq!(values.len(), 1);
     assert_eq!(values.get(1), None);
@@ -70,6 +74,14 @@ fn push_pop_basic() {
 
 #[test]
 fn iter_borrows() {
+    let mut strings = MyVec::<String>::new();
+    strings.push(String::from("a")).unwrap();
+    strings.push(String::from("b")).unwrap();
+    let collected: Vec<&String> = strings.iter().collect();
+    assert_eq!(collected.len(), 2);
+    assert_eq!(collected[0], "a");
+    assert_eq!(collected[1], "b");
+
     let mut values = MyVec::new();
     assert!(values.push(NoTraits(String::from("first"))).is_ok());
     assert!(values.push(NoTraits(String::from("second"))).is_ok());
@@ -211,6 +223,30 @@ fn all_operations_accept_non_copy_non_clone_non_default_non_debug_elements() {
     assert!(values.is_empty());
     assert!(values.push(rejected).is_ok());
     assert_eq!(values.pop().unwrap().0, "rejected");
+}
+
+#[test]
+fn borrowed_into_iterator_preserves_order_references_and_ownership_without_element_bounds() {
+    fn borrowed<T>(values: &MyVec<T>) -> impl Iterator<Item = &T> {
+        IntoIterator::into_iter(values)
+    }
+
+    let mut values = MyVec::<NoTraits>::new();
+    assert!(borrowed(&values).next().is_none());
+    assert!(values.push(NoTraits(String::from("first"))).is_ok());
+    assert!(values.push(NoTraits(String::from("second"))).is_ok());
+
+    let references: Vec<&NoTraits> = borrowed(&values).collect();
+    assert_eq!(references.len(), 2);
+    assert!(std::ptr::eq(references[0], values.get(0).unwrap()));
+    assert!(std::ptr::eq(references[1], values.get(1).unwrap()));
+    let mut texts = Vec::new();
+    for value in &values {
+        texts.push(value.0.as_str());
+    }
+    assert_eq!(texts, ["first", "second"]);
+    assert_eq!(values.pop().unwrap().0, "second");
+    assert_eq!(values.pop().unwrap().0, "first");
 }
 
 #[test]

@@ -116,6 +116,19 @@ impl<T> MyVec<T> {
     }
 }
 
+/// Borrows elements in insertion order, just like [`MyVec::iter`].
+///
+/// Converting `&MyVec<T>` to an iterator neither consumes the container nor
+/// clones elements. Returned references cannot outlive the shared borrow.
+impl<'a, T> IntoIterator for &'a MyVec<T> {
+    type Item = &'a T;
+    type IntoIter = MyVecIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 impl<T> Default for MyVec<T> {
     fn default() -> Self {
         Self::new()

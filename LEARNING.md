@@ -74,7 +74,9 @@ that the container cannot be cleared while a returned reference is still used.
 
 Implementing `Iterator` also enables adapters such as `map`, `filter`, and `collect`
 without implementing them separately. Our iterator advances in insertion order
-and remains exhausted after reaching the end.
+and remains exhausted after reaching the end. `IntoIterator for &MyVec<T>`
+returns that same iterator, enabling `for value in &values` and generic borrowing
+iteration without consuming the container or adding element bounds.
 
 ## 5. Generic parameters and associated types answer different questions
 
@@ -136,6 +138,15 @@ than in a separate optional field that could disagree with the phase.
 
 The model rejects replacing a pending guess or submitting after termination.
 Tests inspect these intermediate states, not just the final text output.
+
+The private `read_input_line` helper owns bounded byte reading, oversized-line
+resynchronization, and UTF-8 validation. It returns EOF, a rejected-line message,
+or text borrowing the reused input buffer. It does not print or change game state.
+`submit_guess` still owns trimming, single-letter validation, and normalization;
+empty lines and multiple letters reach that model unchanged. `exit` remains invalid
+multi-letter input, not a command. Independent helper tests keep I/O failures
+separate from recoverable input rejection, while console tests preserve exact
+messages, prompt/final flushing, and pending/terminal-state read behavior.
 
 ## 9. Useful boundaries
 

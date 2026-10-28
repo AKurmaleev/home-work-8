@@ -31,30 +31,20 @@ pub fn run<R: BufRead, W: Write>(input: &mut R, output: &mut W, mut game: Game) 
                 show_state(output, &game)?;
                 write!(output, "Введите букву: ")?;
                 output.flush()?;
-                line.clear();
-                let count = Read::by_ref(input)
-                    .take((MAX_LINE_BYTES + 1) as u64)
-                    .read_until(b'\n', &mut line)?;
-
-                if count == 0 {
-                    writeln!(
-                        output,
-                        "\nВвод завершён. Игра прервана. Слово: {}",
-                        game.secret_word()
-                    )?;
-                    return output.flush();
-                }
-                if line.len() > MAX_LINE_BYTES {
-                    // Resynchronize at a line boundary; the remainder is not another guess.
-                    if line.last() != Some(&b'\n') {
-                        input.skip_until(b'\n')?;
+                let text = match read_input_line(input, &mut line)? {
+                    InputLine::Eof => {
+                        writeln!(
+                            output,
+                            "\nВвод завершён. Игра прервана. Слово: {}",
+                            game.secret_word()
+                        )?;
+                        return output.flush();
                     }
-                    writeln!(output, "Слишком длинная строка. Введите одну букву.")?;
-                    continue;
-                }
-                let Ok(text) = std::str::from_utf8(&line) else {
-                    writeln!(output, "Некорректный UTF-8. Введите одну букву.")?;
-                    continue;
+                    InputLine::Rejected(message) => {
+                        writeln!(output, "{message}")?;
+                        continue;
+                    }
+                    InputLine::Text(text) => text,
                 };
                 if game.submit_guess(text).is_err() {
                     writeln!(output, "Некорректный ввод. Введите ровно одну букву.")?;
@@ -94,6 +84,41 @@ pub fn run<R: BufRead, W: Write>(input: &mut R, output: &mut W, mut game: Game) 
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum InputLine<'a> {
+    Eof,
+    Rejected(&'static str),
+    Text(&'a str),
+}
+
+// Text borrows the reusable buffer unchanged; letter validation belongs to Game.
+fn read_input_line<'a>(
+    input: &mut impl BufRead,
+    line: &'a mut Vec<u8>,
+) -> io::Result<InputLine<'a>> {
+    line.clear();
+    let count = Read::by_ref(input)
+        .take((MAX_LINE_BYTES + 1) as u64)
+        .read_until(b'\n', line)?;
+    if count == 0 {
+        return Ok(InputLine::Eof);
+    }
+    if line.len() > MAX_LINE_BYTES {
+        // Resynchronize before returning; the remainder is not another guess.
+        if line.last() != Some(&b'\n') {
+            input.skip_until(b'\n')?;
+        }
+        return Ok(InputLine::Rejected(
+            "Слишком длинная строка. Введите одну букву.",
+        ));
+    }
+    Ok(match std::str::from_utf8(line) {
+        Ok(text) => InputLine::Text(text),
+        // Invalid encoding is a recoverable rejection with a fixed user message.
+        Err(_) => InputLine::Rejected("Некорректный UTF-8. Введите одну букву."),
+    })
+}
+
 fn show_state(output: &mut impl Write, game: &Game) -> io::Result<()> {
     writeln!(output, "\nСлово: {}", game.masked_word())?;
     write!(output, "Введённые буквы:")?;
@@ -106,4 +131,173 @@ fn show_state(output: &mut impl Write, game: &Game) -> io::Result<()> {
     }
     writeln!(output)?;
     writeln!(output, "Осталось попыток: {}", game.remaining_attempts())
+}
+
+#[cfg(test)]
+mod input_tests {
+    use std::io::{self, BufReader, Cursor, Read};
+
+    use super::{InputLine, read_input_line};
+
+    #[test]
+    fn preserves_text_for_domain_validation_without_trimming_or_normalizing() {
+        for text in [
+            "\n",
+            " \t\r\n",
+            "ab\n",
+            "exit\n",
+            "İ\n",
+            "e\u{301}\n",
+            "\u{2003}Ё\r\n",
+            "Ж",
+        ] {
+            let mut input = Cursor::new(text.as_bytes());
+            let mut line = Vec::new();
+            assert_eq!(
+                read_input_line(&mut input, &mut line).unwrap(),
+                InputLine::Text(text)
+            );
+        }
+    }
+
+    #[test]
+    fn distinguishes_empty_line_from_eof_and_clears_reused_buffer() {
+        let mut input = Cursor::new(b"\na");
+        let mut line = b"stale bytes".to_vec();
+        assert_eq!(
+            read_input_line(&mut input, &mut line).unwrap(),
+            InputLine::Text("\n")
+        );
+        assert_eq!(
+            read_input_line(&mut input, &mut line).unwrap(),
+            InputLine::Text("a")
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                read_input_line(&mut input, &mut line).unwrap(),
+                InputLine::Eof
+            );
+            assert!(line.is_empty());
+        }
+    }
+
+    #[test]
+    fn counts_utf8_and_crlf_bytes_at_the_128_byte_boundary() {
+        for text in [
+            format!("{}A", " ".repeat(127)),
+            format!("{}Ё \r\n", "\u{2003}".repeat(41)),
+        ] {
+            assert_eq!(text.len(), 128);
+            let mut input = Cursor::new(text.as_bytes());
+            let mut line = Vec::new();
+            assert_eq!(
+                read_input_line(&mut input, &mut line).unwrap(),
+                InputLine::Text(text.as_str())
+            );
+        }
+        let mut input = Cursor::new(format!("{}Ё  \r\n", "\u{2003}".repeat(41)).into_bytes());
+        let mut line = Vec::new();
+        assert_eq!(
+            read_input_line(&mut input, &mut line).unwrap(),
+            InputLine::Rejected("Слишком длинная строка. Введите одну букву.")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_without_consuming_the_following_line() {
+        for prefix in [&b"\xffr\n"[..], &b"\xc3\n"[..], &b"u\xff\n"[..]] {
+            let mut input = Cursor::new([prefix, b"R\n"].concat());
+            let mut line = Vec::new();
+            assert_eq!(
+                read_input_line(&mut input, &mut line).unwrap(),
+                InputLine::Rejected("Некорректный UTF-8. Введите одну букву.")
+            );
+            assert_eq!(
+                read_input_line(&mut input, &mut line).unwrap(),
+                InputLine::Text("R\n")
+            );
+        }
+    }
+
+    #[test]
+    fn discards_oversized_lines_once_without_retaining_the_remainder() {
+        for mut prefix in [vec![b'x'; 128], vec![b'x'; 129], vec![b'\xff'; 1024 * 1024]] {
+            prefix.push(b'\n');
+            let expected_position = u64::try_from(prefix.len()).unwrap();
+            prefix.extend_from_slice(b"r\n");
+            let mut input = Cursor::new(prefix);
+            let mut line = Vec::new();
+            assert_eq!(
+                read_input_line(&mut input, &mut line).unwrap(),
+                InputLine::Rejected("Слишком длинная строка. Введите одну букву.")
+            );
+            assert_eq!(line.len(), 129);
+            assert_eq!(input.position(), expected_position);
+            assert_eq!(
+                read_input_line(&mut input, &mut line).unwrap(),
+                InputLine::Text("r\n")
+            );
+        }
+        let mut input = Cursor::new(vec![b'x'; 130]);
+        let mut line = Vec::new();
+        assert_eq!(
+            read_input_line(&mut input, &mut line).unwrap(),
+            InputLine::Rejected("Слишком длинная строка. Введите одну букву.")
+        );
+        assert_eq!(
+            read_input_line(&mut input, &mut line).unwrap(),
+            InputLine::Eof
+        );
+    }
+
+    #[test]
+    fn handles_utf8_and_discard_boundaries_with_a_one_byte_buffer() {
+        let bytes = [vec![b'x'; 129], "\nЁ\r\nЖ".as_bytes().to_vec()].concat();
+        let mut input = BufReader::with_capacity(1, Cursor::new(bytes));
+        let mut line = Vec::new();
+        assert_eq!(
+            read_input_line(&mut input, &mut line).unwrap(),
+            InputLine::Rejected("Слишком длинная строка. Введите одну букву.")
+        );
+        assert_eq!(
+            read_input_line(&mut input, &mut line).unwrap(),
+            InputLine::Text("Ё\r\n")
+        );
+        assert_eq!(
+            read_input_line(&mut input, &mut line).unwrap(),
+            InputLine::Text("Ж")
+        );
+        assert_eq!(
+            read_input_line(&mut input, &mut line).unwrap(),
+            InputLine::Eof
+        );
+    }
+
+    #[test]
+    fn propagates_stream_errors_instead_of_reclassifying_them_as_rejections() {
+        struct FailingReader(Cursor<Vec<u8>>);
+
+        impl Read for FailingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if buffer.is_empty() {
+                    return Ok(0);
+                }
+                match self.0.read(buffer)? {
+                    0 => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "injected stream failure",
+                    )),
+                    count => Ok(count),
+                }
+            }
+        }
+
+        for prefix in [Vec::new(), b"r".to_vec(), vec![b'x'; 129]] {
+            let mut input = BufReader::with_capacity(2, FailingReader(Cursor::new(prefix)));
+            let mut line = Vec::new();
+            let error = read_input_line(&mut input, &mut line).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(error.to_string(), "injected stream failure");
+        }
+    }
 }

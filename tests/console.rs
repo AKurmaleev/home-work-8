@@ -67,6 +67,71 @@ fn assert_interrupted(output: &str, word: &str) {
 }
 
 #[test]
+fn rejected_input_preserves_exact_messages_before_unicode_win_or_eof() {
+    let initial = concat!(
+        "Игра «Виселица». Вводите по одной букве.\n",
+        "\nСлово: _ _\n",
+        "Введённые буквы: —\n",
+        "Осталось попыток: 5\n",
+        "Введите букву: ",
+    );
+    let waiting = concat!(
+        "\nСлово: _ _\n",
+        "Введённые буквы: —\n",
+        "Осталось попыток: 5\n",
+        "Введите букву: ",
+    );
+    let win = concat!(
+        "Есть такая буква!\n",
+        "\nСлово: ё _\n",
+        "Введённые буквы: ё\n",
+        "Осталось попыток: 5\n",
+        "Введите букву: Есть такая буква!\n",
+        "\nСлово: ё ж\n",
+        "Введённые буквы: ё ж\n",
+        "Осталось попыток: 5\n",
+        "Вы выиграли! Правильное слово: ёж\n",
+    );
+    for (prefix, message) in [
+        (
+            vec![b'\xff', b'\n'],
+            "Некорректный UTF-8. Введите одну букву.",
+        ),
+        (
+            b"\n".to_vec(),
+            "Некорректный ввод. Введите ровно одну букву.",
+        ),
+        (
+            b"ab\n".to_vec(),
+            "Некорректный ввод. Введите ровно одну букву.",
+        ),
+        (
+            b"exit\n".to_vec(),
+            "Некорректный ввод. Введите ровно одну букву.",
+        ),
+        (
+            "İ\n".as_bytes().to_vec(),
+            "Некорректный ввод. Введите ровно одну букву.",
+        ),
+        (
+            [vec![b'x'; 129], b"\n".to_vec()].concat(),
+            "Слишком длинная строка. Введите одну букву.",
+        ),
+    ] {
+        assert_eq!(
+            session(&prefix, "ёж"),
+            format!("{initial}{message}\n{waiting}\nВвод завершён. Игра прервана. Слово: ёж\n"),
+        );
+        let mut input = prefix;
+        input.extend_from_slice("\u{2003}Ё\r\nЖ".as_bytes());
+        assert_eq!(
+            session(&input, "ёж"),
+            format!("{initial}{message}\n{waiting}{win}")
+        );
+    }
+}
+
+#[test]
 fn win_shows_initial_and_final_masks_and_chronological_hits_without_penalty() {
     let output = session(b"t\ns\nu\nr\n", "rust");
 
@@ -574,6 +639,55 @@ fn every_prompt_is_flushed_before_input_is_read() {
     assert_win(text, "rust", "r u s t", 5);
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum CleanupStep {
+    Kill,
+    Wait,
+}
+
+fn cli_input_failure(
+    error: io::Error,
+    mut cleanup: impl FnMut(CleanupStep) -> io::Result<()>,
+) -> io::Error {
+    // Preserve the input failure and attempt both steps before reporting cleanup outcomes.
+    let kill = cleanup(CleanupStep::Kill);
+    let wait = cleanup(CleanupStep::Wait);
+    io::Error::new(
+        error.kind(),
+        format!("cannot write finite CLI input: {error}; kill: {kill:?}; wait: {wait:?}"),
+    )
+}
+
+#[test]
+fn cli_cleanup_attempts_both_steps_and_retains_all_failures() {
+    for (kill_fails, wait_fails) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut steps = Vec::new();
+        let failure = cli_input_failure(
+            io::Error::new(io::ErrorKind::BrokenPipe, "injected input failure"),
+            |step| {
+                steps.push(step);
+                match step {
+                    CleanupStep::Kill if kill_fails => Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "injected kill failure",
+                    )),
+                    CleanupStep::Wait if wait_fails => {
+                        Err(io::Error::other("injected wait failure"))
+                    }
+                    CleanupStep::Kill | CleanupStep::Wait => Ok(()),
+                }
+            },
+        );
+
+        assert_eq!(steps, [CleanupStep::Kill, CleanupStep::Wait]);
+        assert_eq!(failure.kind(), io::ErrorKind::BrokenPipe);
+        let message = failure.to_string();
+        assert!(message.starts_with("cannot write finite CLI input: injected input failure"));
+        assert_eq!(message.contains("injected kill failure"), kill_fails);
+        assert_eq!(message.contains("injected wait failure"), wait_fails);
+    }
+}
+
 #[test]
 fn cli_main_runs_the_fixed_rust_game_with_five_attempts() {
     // The caller must bound the overall test command: wait_with_output has no timeout.
@@ -588,9 +702,11 @@ fn cli_main_runs_the_fixed_rust_game_with_five_attempts() {
         None => Err(io::Error::other("child stdin pipe missing")),
     };
     if let Err(error) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("cannot write finite CLI input: {error}");
+        let failure = cli_input_failure(error, |step| match step {
+            CleanupStep::Kill => child.kill(),
+            CleanupStep::Wait => child.wait().map(|_| ()),
+        });
+        panic!("{failure}");
     }
     let output = child
         .wait_with_output()
